@@ -28,7 +28,7 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from sklearn.preprocessing import MultiLabelBinarizer
-from iterstrat.ml_stratifiers import MultilabelStratifiedShuffleSplit
+from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 
 
 def seed_everything(seed):
@@ -86,7 +86,11 @@ class FocalLoss(nn.Module):
             return F_loss
         
 # TRAIN
-def train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, device, args, log):
+def train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, device, args, log, num_fold):
+    
+    if not os.path.exists(os.path.join(args.save_path,num_fold)):
+        os.makedirs(os.path.join(args.save_path,num_fold))
+        
     since = time.time()
     model = model.to(device)
     #amp
@@ -111,7 +115,9 @@ def train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, d
             running_loss = 0.0
             num_inputs = 0
             metric = torchmetrics.F1(num_classes=6, threshold=0.5, average='micro')
+            metric2 = torchmetrics.F1(num_classes=6, threshold=0.6, average='micro')
             metric = metric.to(device)
+            metric2 = metric2.to(device)
             running_acc = 0.0
             
             pbar = tqdm(dataloaders[phase])
@@ -126,6 +132,7 @@ def train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, d
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
                 acc = metric(torch.sigmoid(outputs), labels)
+                acc2 = metric2(torch.sigmoid(outputs), labels)
 
                 if phase == 'train':
 
@@ -138,27 +145,28 @@ def train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, d
                 running_loss += loss.item()*inputs.size(0)
                 num_inputs += inputs.size(0)
 
-                pbar.set_description("[{}/{}][{}] Loss: {:.6f}  F1 Score: {:.4f}".format(epoch, args.epochs, phase, running_loss/num_inputs, metric.compute()))
+                pbar.set_description("[{}/{}][{}] Loss: {:.6f}  F1 Score: {:.4f} {:.4f}".format(epoch, args.epochs, phase, running_loss/num_inputs, metric.compute(), metric2.compute()))
             
             if phase == 'valid':
                 scheduler.step(running_loss)
                 
             epoch_loss = running_loss / len(datasets[phase])
             epoch_acc = metric.compute()
+            epoch_acc2 = metric2.compute()
             
-            log.info('{} Loss: {:.6f}\t F1 Score: {:.4f}'.format(
-                phase, epoch_loss, epoch_acc))
+            log.info('{} Loss: {:.6f}\t F1 Score: {:.4f} {:.4f}'.format(
+                phase, epoch_loss, epoch_acc, epoch_acc2))
             
             if phase == 'valid' and epoch_loss < best_loss:
                 best_loss = epoch_loss
                 best_acc = epoch_acc
                 best_model_wts = copy.deepcopy(model.state_dict())
-                torch.save(best_model_wts, os.path.join(args.save_path,'{:02d}_epoch_model.pth'.format(epoch)))
+                torch.save(best_model_wts, os.path.join(args.save_path, num_fold,'{:02d}_epoch_model.pth'.format(epoch)))
                 log.info('Save {} epoch model.'.format(epoch))
             elif phase == 'valid' and epoch % 10 == 0:
                 # save model manually
                 model_wts = copy.deepcopy(model.state_dict())
-                torch.save(model_wts, os.path.join(args.save_path,'{:02d}_epoch_model.pth'.format(epoch)))
+                torch.save(model_wts, os.path.join(args.save_path, num_fold, '{:02d}_epoch_model.pth'.format(epoch)))
                 log.info('Save {} epoch model.'.format(epoch))
         
     
@@ -166,17 +174,22 @@ def train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, d
     log.info('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     log.info('Best val Loss: {:.6f} val F1: {:.4f}'.format(best_loss, best_acc))
     
-    model.load_state_dict(best_model_wts)
+    #model.load_state_dict(best_model_wts)
     
-    return model
+    return best_model_wts, best_loss
 
 def train_transformation():
     tsfm = A.Compose([
-        A.Resize(224,224), 
+        #A.Resize(224,224), 
+        A.Resize(512, 512),
+        A.CenterCrop(height=224, width=224),
 
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.ShiftScaleRotate(p=0.5),
+        A.OneOf([
+            A.RandomRotate90(p=0.5),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),            
+        ], p=1),
+        A.RandomGamma(p=0.25),
 
         A.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),    
         A.pytorch.transforms.ToTensor()
@@ -185,7 +198,10 @@ def train_transformation():
 
 def test_transformation():
     tsfm = A.Compose([
-        A.Resize(224,224),
+        #A.Resize(224,224),
+        A.Resize(512, 512),
+        A.CenterCrop(height=224, width=224),
+        
         A.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),    
         A.pytorch.transforms.ToTensor()
     ])
@@ -249,53 +265,57 @@ if __name__ == "__main__":
     # split train / valid dataset
     X,Y = new_train_df['image'].to_numpy(), new_train_df[["healthy", "scab", "frog_eye_leaf_spot", "complex","rust","powdery_mildew"]].to_numpy(dtype=np.float32)
     
-    msss = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=SEED)
-
+    # 5-fold 
+    #msss = MultilabelStratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=SEED)
+    msss = MultilabelStratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+    num_fold = 1
+    image_path = os.path.join(root_path,'train_images')
+    
     for train_index, test_index in msss.split(X, Y):
+        log.info("[{}FOLD] start".format(num_fold))
         log.info("TRAIN:{}\tTEST:{}".format(train_index,test_index))
         X_train, X_test = X[train_index], X[test_index]
-        y_train, y_test = Y[train_index], Y[test_index]    
+        y_train, y_test = Y[train_index], Y[test_index]        
 
-    image_path = os.path.join(root_path,'train_images')
+        train_dataset = PlantPathologyDataset(
+            root_path = image_path, 
+            X=X_train, y=y_train, 
+            transform=train_transformation())
 
-    train_dataset = PlantPathologyDataset(
-        root_path = image_path, 
-        X=X_train, y=y_train, 
-        transform=train_transformation())
-    
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=args.batch_size, 
-        num_workers=args.num_workers, 
-        shuffle=True, pin_memory=True)
-    
-    val_dataset = PlantPathologyDataset(
-        root_path = image_path, 
-        X=X_test, y=y_test, 
-        transform=test_transformation())
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=32, 
-        num_workers=args.num_workers, 
-        shuffle=False, pin_memory=True)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=args.batch_size, 
+            num_workers=args.num_workers, 
+            shuffle=True, pin_memory=True)
 
-    datasets = {'train': train_dataset,
-                'valid': val_dataset}
+        val_dataset = PlantPathologyDataset(
+            root_path = image_path, 
+            X=X_test, y=y_test, 
+            transform=test_transformation())
 
-    dataloaders = {'train': train_loader,
-                   'valid': val_loader}
+        val_loader = DataLoader(
+            val_dataset, 
+            batch_size=32, 
+            num_workers=args.num_workers, 
+            shuffle=False, pin_memory=True)
 
-    # LOAD PRETRAINED ViT MODEL
-    model = EfficientNet.from_pretrained(args.model, num_classes=6)
+        datasets = {'train': train_dataset,
+                    'valid': val_dataset}
 
-    # OPTIMIZER
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.001)
-    # LEARNING RATE SCHEDULER
-    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=1, factor=0.1)
+        dataloaders = {'train': train_loader,
+                       'valid': val_loader}
 
-    criterion = FocalLoss(logits=True)
+        # LOAD PRETRAINED ViT MODEL
+        model = EfficientNet.from_pretrained(args.model, num_classes=6)
 
-        
-    trained_model = train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, device, args, log)
-    torch.save(trained_model.state_dict(),os.path.join(args.save_path,'best_model.pth'))
+        # OPTIMIZER
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2, weight_decay=0.001)
+        # LEARNING RATE SCHEDULER
+        scheduler = ReduceLROnPlateau(optimizer, 'min', patience=1, factor=0.1)
+
+        criterion = FocalLoss(logits=True)
+
+
+        best_model_wts, best_loss = train_model(datasets, dataloaders, model, criterion, optimizer, scheduler, device, args, log, str(num_fold))
+        torch.save(best_model_wts, os.path.join(args.save_path,'{}_best_model_{}.pth'.format(num_fold,str(best_loss).replace('.','_'))))
+        num_fold +=1 
