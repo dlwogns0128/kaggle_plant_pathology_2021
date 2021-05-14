@@ -17,10 +17,9 @@ def test_transformation():
     tsfm = A.Compose([
         A.Resize(224,224),
         #A.Resize(512, 512),
-        A.CenterCrop(height=224, width=224),
         
         A.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),    
-        A.pytorch.transforms.ToTensor()
+        A.pytorch.transforms.ToTensorV2()
     ])
     return tsfm
 
