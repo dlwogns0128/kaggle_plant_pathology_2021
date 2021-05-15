@@ -15,8 +15,7 @@ import os
 
 def test_transformation():
     tsfm = A.Compose([
-        A.Resize(224,224),
-        #A.Resize(512, 512),
+        A.Resize(224,224, interpolation=cv2.INTER_AREA),
         
         A.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),    
         A.pytorch.transforms.ToTensorV2()
@@ -63,11 +62,17 @@ class PlantModel(nn.Module):
         return x
     
 if __name__ == "__main__":
-    
+    os.environ["CUDA_VISIBLE_DEVICES"]="2"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     test_root_path = "/data/kaggle/plant-pathology-2021-fgvc8/test_images/"
     test_data = os.listdir(test_root_path)
+    
+    #Validation test
+    #data_df = pd.read_csv(os.path.join('./mod_train.csv'))
+    #test_root_path = "/data/kaggle/plant-pathology-2021-fgvc8/train_images/"
+    #test_data = data_df[data_df['fold']==0]['image'].to_numpy()
+    #test_data = test_data[:10]
     
     test_transform = test_transformation()
     
@@ -75,9 +80,10 @@ if __name__ == "__main__":
     test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False, pin_memory=False, num_workers=4)
     
     model = PlantModel("efficientnet-b3", num_classes=6, pretrained=False)
-    model.load_state_dict(torch.load('/data/kaggle/plant-pathology-2021-fgvc8/efficientnet_b3_seed_1110/0_best_model_9_788285297970313.pth'))
+    model.load_state_dict(torch.load('/data/kaggle/plant-pathology-2021-fgvc8/trained_model/210515_efficientnet_b3_seed_1110_512/1_best_model_0_06420736894945336.pth'))
     
     model = model.to(device)
+    model.eval() #..... 이거였다...
     
     classes = ["healthy", "scab", "frog_eye_leaf_spot", "complex","rust","powdery_mildew"]
     result = {'image':[], 'labels':[]}
